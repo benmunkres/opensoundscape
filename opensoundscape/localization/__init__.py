@@ -10,6 +10,7 @@ from .localization_algorithms import (
     gillette_localize,
     soundfinder_localize,
     least_squares_localize,
+    correlation_sum_localize,
     SPEED_OF_SOUND,
 )
 from .position_estimate import PositionEstimate

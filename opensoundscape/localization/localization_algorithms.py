@@ -481,15 +481,14 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     """
     # Get inputs into correct format (and format check them)
     receiver_locations = np.asarray(receiver_locations).astype(np.float64)
-    n_receivers = receiver_locations.shape[0]
     # check dims TODO
 
-    num_recorders = receiver_locations.shape[0]
-    assert(pair_cross_correlations.shape[0] == num_recorders)
-    assert(pair_cross_correlations.shape[1] == num_recorders)
+    num_receivers = receiver_locations.shape[0]
+    assert(pair_cross_correlations.shape[0] == num_receivers)
+    assert(pair_cross_correlations.shape[1] == num_receivers)
 
     # create an iterator of all unique recorder pairs (ignoring pairs with the same numbers)
-    recorder_pairs = itertools.combinations(range(0, N), 2)
+    receiver_pairs = itertools.combinations(range(0, N), 2)
 
     ### create a grid (as an iterator instead of using ndarrays)
     start_pt, end_pt, spacing = grid_params
@@ -528,7 +527,7 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
 
     ### apply a hilbert envelope to each cross-correlation if requested
     if apply_envelope:
-        for pair in recorder_pairs:
+        for pair in receiver_pairs:
             # apply the hilbert envelope
             x_h = hilbert(pair_cross_correlations[pair])
             pair_cross_correlations[pair] = np.real(x_h) + np.imag(x_h)
@@ -545,7 +544,7 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
 
     # upsample to target samplerate
     if goal_samplerate < samplerate:
-        for pair in recorder_pairs:
+        for pair in receiver_pairs:
             x = pair_cross_correlations[pair]
             if apply_envelope:
                 # if we have an envelope we can more likely get away with simpler interpolation as it's smoother
@@ -568,7 +567,7 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     corr_sum_handle = functools.partial(corr_sum, receiver_locations=receiver_locations,
                                         pair_cross_correlations=pair_cross_correlations,
                                         speed_of_sound=speed_of_sound, samplerate=samplerate
-                                        receiver_pairs=recorder_pairs, xc_length=xc_length)
+                                        receiver_pairs=receiver_pairs, xc_length=xc_length)
 
     # final grid of evaluated points
     x_size = grid_x.len()
