@@ -8,6 +8,7 @@ import functools
 from scipy.signal import hilbert
 from scipy.ndimage import maximum_filter
 import librosa
+from tqdm import tqdm
 
 # define defaults for physical constants
 SPEED_OF_SOUND = 343  # m/s
@@ -415,7 +416,7 @@ def gillette_localize(receiver_locations, arrival_times, speed_of_sound):
     return coords
 
 def corr_sum(point,
-             receiver_locations, pair_cross_corellations,
+             receiver_locations, pair_cross_correlations,
              speed_of_sound, samplerate,
              receiver_pairs, xc_length):
     """
@@ -433,20 +434,24 @@ def corr_sum(point,
     sum_val = 0.0
     xc_midpoint = xc_length/2
     receiver_lag_idxs = samplerate/speed_of_sound * np.linalg.norm(receiver_locations - point, axis = 1)
+    # print(list(receiver_pairs))
     for i, j in receiver_pairs:
-        xc_index = np.round(xc_midpoint + receiver_lag_idxs[i] - receiver_lag_idxs[j])
+        xc_index = int(np.round(xc_midpoint + receiver_lag_idxs[i] - receiver_lag_idxs[j]))
         if xc_index < 0 or xc_index >= xc_length:
             pass
         else:
-            sum_val += pair_cross_corellations[(i, j)][xc_index]
+            sum_val += pair_cross_correlations[(i, j)][xc_index]
 
+    # print(sum_val)
     return sum_val
 
 def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
                              samplerate, speed_of_sound: float,
                              grid: tuple[tuple, tuple, float] = (None, None, 1),
                              apply_envelope: bool = True,
-                             return_points: int = None, maxima_scale: float = 3,
+                             return_points: int = None,
+                             threshold = 0.8,
+                             maxima_scale: float = 1,
                              return_grid: bool = False):
     """
     Localize an audio event using the Correlation Sum method presented in Birchfield and Gillmor. [1],
@@ -465,6 +470,7 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
             in the form (starting point, ending point, dimension spacing).
         apply_envelope: Whether a Hilbert envelope be applied to the cross-correlations (as is done in [2])
         return_pts: Number of possible locations to return (automatic if None)
+        threshold: Relative threshold to return local maxima above (if return_pts is None)
         maxima_scale: The spatial scale of local maxima (how far apart are the local maxima in meters)
         return_grid: Should the entire evaluated grid be returned
 
@@ -484,14 +490,13 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     # check dims TODO
 
     num_receivers = receiver_locations.shape[0]
-    assert(pair_cross_correlations.shape[0] == num_receivers)
-    assert(pair_cross_correlations.shape[1] == num_receivers)
 
     # create an iterator of all unique recorder pairs (ignoring pairs with the same numbers)
-    receiver_pairs = itertools.combinations(range(0, N), 2)
+    receiver_pairs = list(itertools.combinations(range(0, num_receivers), 2))
+    # print(list(receiver_pairs))
 
     ### create a grid (as an iterator instead of using ndarrays)
-    start_pt, end_pt, spacing = grid_params
+    start_pt, end_pt, spacing = grid
     # if start and end locations are not specified, grid will enclose all recorders
     if start_pt is None:
         start_pt = receiver_locations.min(axis=0)
@@ -504,8 +509,8 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     end_pt = pt_range.max(axis=0)
 
     # number of dimensions the grid has (can still have 2d array and 3d grid)
-    n_grid_dims = start_pt.len()
-    assert(n_grid_dims == end_pt.len())
+    n_grid_dims = start_pt.shape[0]
+    assert(n_grid_dims == end_pt.shape[0])
     # augment recorder locations if needed
     if receiver_locations.shape[1] != 3:
         # add zero as last coord in each recorder location,
@@ -518,9 +523,9 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
         spacing = (spacing,)*n_grid_dims
 
     # create a vector of points along each dim to evaluate at
-    grid_x = np.linspace(start_pt[0], end_pt[0], num = (end_pt[0] - start_pt[0])/spacing[0])
+    grid_x = np.arange(start_pt[0], end_pt[0], spacing[0])
     grid_y = np.arange(start_pt[1], end_pt[1], spacing[1])
-    grid_z = np.zeros(1) if (n_grid_dims == 2) else np.arange(start_pt[2], end_pt[2], spacing[2])
+    grid_z = np.zeros(1) if (n_grid_dims == 2) else np.arange(start_pt[2], end_pt[2]+1e-10, spacing[2])
 
     # create actual "grid" as an iterator by taking cartesian product of all axes
     grid_iter = itertools.product(grid_x, grid_y, grid_z)
@@ -548,12 +553,12 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
             x = pair_cross_correlations[pair]
             if apply_envelope:
                 # if we have an envelope we can more likely get away with simpler interpolation as it's smoother
-                pair_cross_correlations[pair] = librosa.resample(x, samplerate,
-                                                                 goal_samplerate,
+                pair_cross_correlations[pair] = librosa.resample(x, orig_sr=samplerate,
+                                                                 target_sr=goal_samplerate,
                                                                  res_type='soxr_qq')
             else:
-                pair_cross_correlations[pair] = librosa.resample(x, samplerate,
-                                                                 goal_samplrate,
+                pair_cross_correlations[pair] = librosa.resample(x, orig_sr=samplerate,
+                                                                 target_sr=goal_samplrate,
                                                                  res_type='soxr_hq')
 
     samplerate = goal_samplerate
@@ -566,18 +571,18 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     # we can call this on only the point (also can use starmap on this)
     corr_sum_handle = functools.partial(corr_sum, receiver_locations=receiver_locations,
                                         pair_cross_correlations=pair_cross_correlations,
-                                        speed_of_sound=speed_of_sound, samplerate=samplerate
+                                        speed_of_sound=speed_of_sound, samplerate=samplerate,
                                         receiver_pairs=receiver_pairs, xc_length=xc_length)
 
     # final grid of evaluated points
-    x_size = grid_x.len()
-    y_size = grid_y.len()
-    z_size = grid_z.len()
+    x_size = grid_x.shape[0]
+    y_size = grid_y.shape[0]
+    z_size = grid_z.shape[0]
     xc_sum_grid = np.zeros((x_size, y_size, z_size))
 
     index_iter = itertools.product(range(x_size), range(y_size), range(z_size))
     # can potentially replace with mp.Array and a pool to parallelize
-    for (x_i, y_i, z_i), point in zip(index_iter, grid_iter):
+    for (x_i, y_i, z_i), point in tqdm(zip(index_iter, grid_iter), total=(x_size*y_size*z_size)):
         xc_sum_grid[x_i, y_i, z_i] = corr_sum_handle(np.asarray(point))
 
 
@@ -593,7 +598,7 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     d = np.round(2*r+1)
     fp_x, fp_y, fp_z = np.ogrid[0:d, 0:d, 0:d]
     c_dist = np.sqrt((fp_x - r)**2 + (fp_y - r)**2 + (fp_z - r)**2) # distance from center point
-    fp = dist_from_center <= r
+    fp = c_dist <= r
 
     # perform maximum filtering using mask on grid
     xc_sum_grid_filt = maximum_filter(xc_sum_grid, footprint=fp, mode='nearest')
@@ -605,9 +610,10 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     # get values of local maxima
     # definitely a faster way to do this
     local_maxima_values = np.asarray([xc_sum_grid[i, j, k] for i, j, k in local_maxima_idxs])
+    local_maxima_values /= local_maxima_values.max()
 
     # sort based on max maxima values
-    sort_idx = np.argsort(local_maxima_values)
+    sort_idx = np.argsort(local_maxima_values)[::-1]
     local_maxima_values = local_maxima_values[sort_idx]
     local_maxima_coords = local_maxima_coords[sort_idx, :]
 
@@ -615,6 +621,10 @@ def correlation_sum_localize(receiver_locations, pair_cross_correlations: dict,
     if return_points is not None:
         local_maxima_values = local_maxima_values[:return_points]
         local_maxima_coords = local_maxima_coords[:return_points, :]
+    else:
+        keep_idx = local_maxima_values >= threshold
+        local_maxima_values = local_maxima_values[keep_idx]
+        local_maxima_coords = local_maxima_coords[keep_idx]
 
     # find global maxima of grid:
     # i_max = xc_sum_grid.argmax()
